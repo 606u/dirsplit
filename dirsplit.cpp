@@ -57,7 +57,7 @@ struct File {
 static bool
 file_name_less(const File &lhs, const File &rhs)
 {
-	return strcasecmp(lhs.name.c_str(), rhs.name.c_str()) == -1;
+	return strcasecmp(lhs.name.c_str(), rhs.name.c_str()) < 0;
 }
 
 struct Directory {
@@ -79,7 +79,7 @@ struct Directory {
 static bool
 dir_name_less(const Directory &lhs, const Directory &rhs)
 {
-	return strcasecmp(lhs.name.c_str(), rhs.name.c_str()) == -1;
+	return strcasecmp(lhs.name.c_str(), rhs.name.c_str()) < 0;
 }
 
 struct ScanOpts {
