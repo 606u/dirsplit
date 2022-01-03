@@ -4,6 +4,8 @@ Command-line utility to split a directory to multiple parts of mostly equal size
 
 There are several supported targets:
 
+  * `scan` to estimate volumes and their sizes (a dry run);
+
   * `iso` to create an optical disc image with aliases `cd74`, `dvd`
     and `bd`, that assign target size matching to 74-minute CD-R,
     single-layer DVD-R or BD-R media respectively;

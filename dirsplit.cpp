@@ -323,6 +323,29 @@ create_listfiles(Job &job)
 	return 0;
 }
 
+static int
+scan_inpath(Job &job)
+{
+	size_t volume_no = 1, n_files = 0;
+	off_t tot_size = 0;
+	for (const auto *file : job.all_files) {
+		if (file->volume_no != volume_no) {
+			printf("volume %u is %ld bytes in %u files (%.1f%% full)\n",
+			       unsigned(volume_no), long(tot_size), unsigned(n_files),
+			       tot_size * 100.0 / job.volume_size);
+			++volume_no;
+			n_files = 0;
+			tot_size = 0;
+		}
+		++n_files;
+		tot_size += file->size;
+	}
+	printf("volume %u is %ld bytes in %u files (%.1f%% full)\n",
+	       unsigned(volume_no), long(tot_size), unsigned(n_files),
+	       tot_size * 100.0 / job.volume_size);
+	return 0;
+}
+
 typedef void (*SubProcessFn)(Job&, const char*listfile, const char *outpath,
 			     size_t volume_id);
 static int
@@ -424,6 +447,7 @@ usage(void)
 	puts("                                           tar|tgz|txz <name>_%#.tar");
 	puts("                                           dir <name>_%#");
 	puts("                                           listfile <name>_%#.txt");
+	puts("                                           scan");
 }
 
 int
@@ -439,7 +463,7 @@ main(int argc, char *argv[])
 	}
 	argc -= optind;
 	argv += optind;
-	if (argc != 3) {
+	if (argc < 2) {
 		usage();
 		return EX_USAGE;
 	}
@@ -447,6 +471,7 @@ main(int argc, char *argv[])
 	job.inpath = argv[0];
 
 	job.target = argv[1];
+	bool need_output = true;
 	off_t autosize_mb = 0;
 	if (job.target == "iso") {
 		job.handler = &create_iso;
@@ -463,6 +488,9 @@ main(int argc, char *argv[])
 		job.handler = &create_tar;
 	} else if (job.target == "listfile") {
 		job.handler = &create_listfiles;
+	} else if (job.target == "scan") {
+		job.handler = &scan_inpath;
+		need_output = false;
 	} else {
 		errx(EX_USAGE, "illegal target -- %s", job.target.c_str());
 	}
@@ -471,34 +499,39 @@ main(int argc, char *argv[])
 	if (!job.volume_size)
 		errx(EX_USAGE, "%s target requires a volume size (-s)",
 		     job.target.c_str());
+	if (need_output && argc == 2)
+		errx(EX_USAGE, "%s target requires an output path", job.target.c_str());
 
-	job.outpath = argv[2];
-	if (job.outpath.find("%#") == job.outpath.npos)
-		errx(EX_USAGE, "illegal output path '%s' -- no %%# placeholder found",
-		     job.outpath.c_str());
-	if (job.outpath[0] != '/') {
-		// Convert output path to absolute, because working
-		// directory is changed for some targets.  outpath
-		// might be explicitly (./dir/name) or implicitly
-		// (dir/name) relative
-		const char *slash = strrchr(job.outpath.c_str(), '/');
-		std::string outdir;
-		if (slash) {
-			outdir.assign(job.outpath.c_str(), slash);
-		} else {
-			outdir.assign(".");
+	if (need_output) {
+		job.outpath = argv[2];
+		if (job.outpath.find("%#") == job.outpath.npos)
+			errx(EX_USAGE,
+			     "illegal output path '%s' -- no %%# placeholder found",
+			     job.outpath.c_str());
+		if (job.outpath[0] != '/') {
+			// Convert output path to absolute, because working
+			// directory is changed for some targets.  outpath
+			// might be explicitly (./dir/name) or implicitly
+			// (dir/name) relative
+			const char *slash = strrchr(job.outpath.c_str(), '/');
+			std::string outdir;
+			if (slash) {
+				outdir.assign(job.outpath.c_str(), slash);
+			} else {
+				outdir.assign(".");
+			}
+			char *abspath = realpath(outdir.c_str(), 0);
+			if (!abspath)
+				err(EX_OSERR, "realpath '%s'", outdir.c_str());
+			outdir.assign(abspath);
+			free(abspath);
+			if (slash) {
+				outdir.append(slash);
+			} else {
+				outdir.append(1, '/').append(job.outpath);
+			}
+			job.outpath = outdir;
 		}
-		char *abspath = realpath(outdir.c_str(), 0);
-		if (!abspath)
-			err(EX_OSERR, "realpath '%s'", outdir.c_str());
-		outdir.assign(abspath);
-		free(abspath);
-		if (slash) {
-			outdir.append(slash);
-		} else {
-			outdir.append(1, '/').append(job.outpath);
-		}
-		job.outpath = outdir;
 	}
 
 	int fd = open(job.inpath.c_str(), O_RDONLY | O_DIRECTORY);
