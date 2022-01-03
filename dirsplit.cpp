@@ -1,4 +1,5 @@
 #include <sys/types.h>
+#include <cassert>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -197,9 +198,11 @@ scan_dir(const char *base_path, int base_fd, Directory *dir, ScanOpts *opts)
 			file.parent = dir;
 			file.name = entry->d_name;
 			file.size = st.st_size;
-			if (opts)
+			if (opts && opts->block_size) {
 				file.size = (file.size + opts->block_size - 1) &
-					~opts->block_size;
+					~(opts->block_size - 1);
+				assert((file.size % opts->block_size) == 0);
+			}
 			file.st = st;
 
 			dir->tot_size += file.size;
@@ -475,14 +478,18 @@ main(int argc, char *argv[])
 	off_t autosize_mb = 0;
 	if (job.target == "iso") {
 		job.handler = &create_iso;
+		job.scan_opts.block_size = 2048;
 	} else if (job.target == "cd74") {
 		job.handler = &create_iso;
+		job.scan_opts.block_size = 2048;
 		autosize_mb = 650;
 	} else if (job.target == "dvd") {
 		job.handler = &create_iso;
+		job.scan_opts.block_size = 2048;
 		autosize_mb = 4474;
 	} else if (job.target == "bd") {
 		job.handler = &create_iso;
+		job.scan_opts.block_size = 2048;
 		autosize_mb = 23828;
 	} else if (job.target == "tar" || job.target == "tgz" || job.target == "txz") {
 		job.handler = &create_tar;
