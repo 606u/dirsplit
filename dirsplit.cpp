@@ -94,6 +94,8 @@ struct Job {
 	std::string target;
 	std::string outpath;
 	off_t volume_size = 0;
+	size_t per_volume_overhead = 0;
+	// TODO: need per-directory overhead
 	size_t per_file_overhead = 0;
 	ScanOpts scan_opts;
 	size_t volume_no = 0;
@@ -253,7 +255,7 @@ assign_volumes(Job &job)
 			      file->name.c_str());
 		if (size + file_size > job.volume_size) {
 			++job.volume_no;
-			size = 0;
+			size = job.per_volume_overhead;
 		}
 		file->volume_no = job.volume_no;
 		size += file_size;
@@ -475,24 +477,25 @@ main(int argc, char *argv[])
 
 	job.target = argv[1];
 	bool need_output = true;
-	off_t autosize_mb = 0;
-	if (job.target == "iso") {
+	if (job.target == "iso" || job.target == "cd74" || job.target == "dvd" ||
+	    job.target == "bd") {
 		job.handler = &create_iso;
+		job.per_volume_overhead = 1024 * 1024;
+		job.per_file_overhead = 2048;
 		job.scan_opts.block_size = 2048;
-	} else if (job.target == "cd74") {
-		job.handler = &create_iso;
-		job.scan_opts.block_size = 2048;
-		autosize_mb = 650;
-	} else if (job.target == "dvd") {
-		job.handler = &create_iso;
-		job.scan_opts.block_size = 2048;
-		autosize_mb = 4474;
-	} else if (job.target == "bd") {
-		job.handler = &create_iso;
-		job.scan_opts.block_size = 2048;
-		autosize_mb = 23828;
+		off_t autosize_mb = 0;
+		if (job.target == "cd74") {
+			autosize_mb = 650;
+		} else if (job.target == "dvd") {
+			autosize_mb = 4474;
+		} else if (job.target == "bd") {
+			autosize_mb = 23828;
+		}
+		if (!job.volume_size && autosize_mb)
+			job.volume_size = autosize_mb * 1024;
 	} else if (job.target == "tar" || job.target == "tgz" || job.target == "txz") {
 		job.handler = &create_tar;
+		job.per_file_overhead = 512;
 	} else if (job.target == "listfile") {
 		job.handler = &create_listfiles;
 	} else if (job.target == "scan") {
@@ -501,8 +504,6 @@ main(int argc, char *argv[])
 	} else {
 		errx(EX_USAGE, "illegal target -- %s", job.target.c_str());
 	}
-	if (!job.volume_size && autosize_mb)
-		job.volume_size = autosize_mb * 1024;
 	if (!job.volume_size)
 		errx(EX_USAGE, "%s target requires a volume size (-s)",
 		     job.target.c_str());
