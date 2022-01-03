@@ -329,8 +329,10 @@ static int
 subprocess(Job &job, const char *procname, SubProcessFn handler)
 {
 	char listfile[] = { "/tmp/dirsplit.XXXXXX" };
-	if (!mktemp(listfile))
-		err(EX_OSERR, "mktemp");
+	int fd = mkstemp(listfile);
+	if (fd == -1)
+		err(EX_OSERR, "mkstemp");
+	close(fd);
 	for (size_t i = 1; i <= job.volume_no; ++i) {
 		create_listfile(job, listfile, i);
 		std::string path = expand_outpath(job.outpath, i, job.volume_no);
