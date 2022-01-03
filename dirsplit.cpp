@@ -62,7 +62,7 @@ file_name_less(const File &lhs, const File &rhs)
 
 struct Directory {
 	Directory *parent = 0;
-	std::string path;	// /-terminated
+	std::string path;	// /-terminated, relative to job.inpath
 	std::string name;
 	off_t tot_size = 0;
 	size_t volume_no = 0;	// 0 if split across >1 volume
@@ -146,6 +146,7 @@ scan_dir(const char *base_path, int base_fd, Directory *dir, ScanOpts *opts)
 	const bool root_dir = dir->is_root();
 	const char *path = dir->path.c_str();
 	const bool aoe = opts && opts->abort_on_err;
+	// base_fd is fd for job.inpath already
 	int fd = !root_dir ? openat(base_fd, dir->name.c_str(), O_RDONLY | O_DIRECTORY) : base_fd;
 	if (fd == -1) {
 		if (aoe) err(EX_OSERR, "opendir '%s/%s'", base_path, path);
@@ -181,14 +182,10 @@ scan_dir(const char *base_path, int base_fd, Directory *dir, ScanOpts *opts)
 			dir->subdirs.push_back(Directory());
 			auto &subdir = dir->subdirs.back();
 			subdir.parent = dir;
-			if (!root_dir) {
-				subdir.path.assign(path).append(1, '/')
-					.append(entry->d_name).append(1, '/');
-				subdir.name = subdir.path.c_str() + strlen(path) + 1;
-			} else {
-				subdir.path.assign(entry->d_name).append(1, '/');
-				subdir.name = subdir.path.c_str();
-			}
+			if (!root_dir)
+				subdir.path.assign(path);
+			subdir.path.append(entry->d_name).append(1, '/');
+			subdir.name = entry->d_name;
 			subdir.st = st;
 			res |= scan_dir(base_path, fd, &subdir, opts);
 			dir->tot_size += subdir.tot_size;
@@ -229,7 +226,7 @@ unfold_depth1st(Directory &dir, std::list<File*> *all_files)
 		all_files->push_back(&file);
 }
 
-static void
+void
 print_leaves(const Directory &dir)
 {
 	for (const auto &subdir : dir.subdirs) {
@@ -552,7 +549,7 @@ main(int argc, char *argv[])
 	//printf("total usage for '%s' is %ld\n", job.inpath.c_str(),
 	//       long(job.root.tot_size));
 
-	print_leaves(job.root);
+	//print_leaves(job.root);
 	unfold_depth1st(job.root, &job.all_files);
 	assign_volumes(job);
 	return job.handler(job);
