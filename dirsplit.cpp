@@ -435,13 +435,11 @@ copy_file(const std::string &srcpath, const File &file,
 		res = false;
 	}
 
-#if defined(__FreeBSD__) || defined(__APPLE__)
 	// Preserve ownership
 	if (res && fchown(outfd, file.st.st_uid, file.st.st_gid) == -1) {
 		warn("chown '%s'", tempfile.c_str());
 		res = false;
 	}
-#endif
 
 	// Preserve access and modification times
 #if !defined(__APPLE__)
