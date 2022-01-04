@@ -438,7 +438,11 @@ copy_file(const std::string &srcpath, const File &file,
 	}
 
 	// Preserve access and modification times
+#if !defined(__APPLE__)
 	timespec ts[2] = { file.st.st_atim, file.st.st_mtim };
+#else
+	timespec ts[2] = { file.st.st_atimespec, file.st.st_mtimespec };
+#endif
 	if (res && futimens(outfd, ts) == -1) {
 		warn("utimens '%s'", tempfile.c_str());
 		res = false;
