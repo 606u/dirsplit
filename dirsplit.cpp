@@ -17,42 +17,42 @@
 #include <vector>
 
 template <typename T, typename Dtor> struct Guard { // RAII guard
-        T handle;
-        Dtor dtor;
-        Guard(T handle, Dtor dtor)
-            : handle(handle)
-            , dtor(dtor)
-        {
-        }
-        Guard(const Guard &) = delete;
-        Guard(Guard &&src)
-            : handle(src.handle)
-            , dtor(src.dtor)
-        {
-                src.handle = 0;
-        }
-        ~Guard()
-        {
-                if (handle)
-                        dtor(handle);
-        }
-        Guard &operator=(const Guard &) = delete;
+	T handle;
+	Dtor dtor;
+	Guard(T handle, Dtor dtor)
+	    : handle(handle)
+	    , dtor(dtor)
+	{
+	}
+	Guard(const Guard &) = delete;
+	Guard(Guard &&src)
+	    : handle(src.handle)
+	    , dtor(src.dtor)
+	{
+		src.handle = 0;
+	}
+	~Guard()
+	{
+		if (handle)
+			dtor(handle);
+	}
+	Guard &operator=(const Guard &) = delete;
 };
 template <typename T, typename Dtor>
 static inline Guard<T, Dtor>
 autofree(T handle, Dtor dtor)
 {
-        return Guard<T, Dtor>(handle, dtor);
+	return Guard<T, Dtor>(handle, dtor);
 }
 
 struct Directory;
 struct File {
 	Directory *parent = 0;
 	std::string name;
-	off_t size;		// rounded-up to block size
+	off_t size; // rounded-up to block size
 	struct stat st;
 	size_t volume_no = 0;
-	typedef bool (*OrderFn)(const File&, const File&);
+	typedef bool (*OrderFn)(const File &, const File &);
 };
 static bool
 file_name_less(const File &lhs, const File &rhs)
@@ -62,19 +62,19 @@ file_name_less(const File &lhs, const File &rhs)
 
 struct Directory {
 	Directory *parent = 0;
-	std::string path;	// /-terminated, relative to job.inpath
+	std::string path; // /-terminated, relative to job.inpath
 	std::string name;
 	off_t tot_size = 0;
-	size_t volume_no = 0;	// 0 if split across >1 volume
+	size_t volume_no = 0; // 0 if split across >1 volume
 	typedef std::list<Directory> Subdirs;
 	typedef std::list<File> Files;
 	Subdirs subdirs;
 	Files files;
 	struct stat st;
-	time_t newf_mtime = 0;	// mtime of newest file inside
+	time_t newf_mtime = 0; // mtime of newest file inside
 	bool is_root(void) const { return name.empty(); }
 	bool is_leaf(void) const { return subdirs.empty(); }
-	typedef bool (*OrderFn)(const Directory&, const Directory&);
+	typedef bool (*OrderFn)(const Directory &, const Directory &);
 };
 static bool
 dir_name_less(const Directory &lhs, const Directory &rhs)
@@ -83,7 +83,7 @@ dir_name_less(const Directory &lhs, const Directory &rhs)
 }
 
 struct ScanOpts {
-	size_t block_size = 512;
+	off_t block_size = 512;
 	bool abort_on_err = false;
 	Directory::OrderFn dir_order = &dir_name_less;
 	File::OrderFn file_order = &file_name_less;
@@ -94,14 +94,14 @@ struct Job {
 	std::string target;
 	std::string outpath;
 	off_t volume_size = 0;
-	size_t per_volume_overhead = 0;
+	off_t per_volume_overhead = 0;
 	// TODO: need per-directory overhead
-	size_t per_file_overhead = 0;
+	off_t per_file_overhead = 0;
 	ScanOpts scan_opts;
 	size_t volume_no = 0;
 
 	Directory root;
-	std::list<File*> all_files;
+	std::list<File *> all_files;
 	typedef int (*HandlerFn)(Job &job);
 	HandlerFn handler = 0;
 };
@@ -126,16 +126,16 @@ static off_t
 parse_size(const char *s)
 {
 	char *endp;
-	long n = strtoul(s, &endp, 0);
+	long n = strtol(s, &endp, 0);
 	off_t scale;
 	if (*endp && *endp == '.') {
 		// Assume a floating point number
 		double d = strtod(s, &endp);
-		if ((scale = parse_si_scale(endp)) == 0)
+		if (d < 0 || (scale = parse_si_scale(endp)) == 0)
 			errx(EX_USAGE, "illegal size -- %s", s);
 		return off_t(d * double(scale));
 	}
-	if ((scale = parse_si_scale(endp)) == 0)
+	if (n < 0 || (scale = parse_si_scale(endp)) == 0)
 		errx(EX_USAGE, "illegal size -- %s", s);
 	return n * scale;
 }
@@ -147,15 +147,19 @@ scan_dir(const char *base_path, int base_fd, Directory *dir, ScanOpts *opts)
 	const char *path = dir->path.c_str();
 	const bool aoe = opts && opts->abort_on_err;
 	// base_fd is fd for job.inpath already
-	int fd = !root_dir ? openat(base_fd, dir->name.c_str(), O_RDONLY | O_DIRECTORY) : base_fd;
+	int fd = !root_dir ?
+		  openat(base_fd, dir->name.c_str(), O_RDONLY | O_DIRECTORY) :
+		  base_fd;
 	if (fd == -1) {
-		if (aoe) err(EX_OSERR, "opendir '%s/%s'", base_path, path);
+		if (aoe)
+			err(EX_OSERR, "opendir '%s/%s'", base_path, path);
 		warn("opendir '%s/%s'", base_path, path);
 		return -1;
 	}
 	DIR *dirp = fdopendir(fd); // XXX: leaked upon exception
 	if (!dirp) {
-		if (aoe) err(EX_OSERR, "opendir '%s/%s'", base_path, path);
+		if (aoe)
+			err(EX_OSERR, "opendir '%s/%s'", base_path, path);
 		warn("opendir '%s/%s'", base_path, path);
 		close(fd);
 		return -1;
@@ -168,10 +172,11 @@ scan_dir(const char *base_path, int base_fd, Directory *dir, ScanOpts *opts)
 		if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
 			continue;
 		struct stat st;
-		if (fstatat(fd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW) == -1) {
+		if (fstatat(fd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW) ==
+		    -1) {
 			if (aoe)
-				err(EX_OSERR, "stat '%s/%s/%s'", base_path, path,
-				    entry->d_name);
+				err(EX_OSERR, "stat '%s/%s/%s'", base_path,
+				    path, entry->d_name);
 			warn("stat '%s/%s/%s'", base_path, path, entry->d_name);
 			res = 1;
 			continue;
@@ -190,7 +195,7 @@ scan_dir(const char *base_path, int base_fd, Directory *dir, ScanOpts *opts)
 			res |= scan_dir(base_path, fd, &subdir, opts);
 			dir->tot_size += subdir.tot_size;
 			dir->newf_mtime =
-				(std::max)(dir->newf_mtime, subdir.newf_mtime);
+			    (std::max)(dir->newf_mtime, subdir.newf_mtime);
 		} else if (is_file) {
 			dir->files.push_back(File());
 			auto &file = dir->files.back();
@@ -199,13 +204,14 @@ scan_dir(const char *base_path, int base_fd, Directory *dir, ScanOpts *opts)
 			file.size = st.st_size;
 			if (opts && opts->block_size) {
 				file.size = (file.size + opts->block_size - 1) &
-					~(opts->block_size - 1);
+				    ~(opts->block_size - 1);
 				assert((file.size % opts->block_size) == 0);
 			}
 			file.st = st;
 
 			dir->tot_size += file.size;
-			dir->newf_mtime = (std::max)(dir->newf_mtime, st.st_mtime);
+			dir->newf_mtime =
+			    (std::max)(dir->newf_mtime, st.st_mtime);
 		}
 	}
 
@@ -218,7 +224,7 @@ scan_dir(const char *base_path, int base_fd, Directory *dir, ScanOpts *opts)
 }
 
 static void
-unfold_depth1st(Directory &dir, std::list<File*> *all_files)
+unfold_depth1st(Directory &dir, std::list<File *> *all_files)
 {
 	for (auto &subdir : dir.subdirs)
 		unfold_depth1st(subdir, all_files);
@@ -231,8 +237,8 @@ print_leaves(const Directory &dir)
 {
 	for (const auto &subdir : dir.subdirs) {
 		if (subdir.is_leaf()) {
-			printf("%12ld\t%s\n",
-			       long(subdir.tot_size), subdir.path.c_str());
+			printf("%12ld\t%s\n", long(subdir.tot_size),
+			       subdir.path.c_str());
 		} else {
 			print_leaves(subdir);
 		}
@@ -271,7 +277,8 @@ expand_outpath(const std::string &outpath, size_t volume_no, size_t num_volumes)
 		test = test * 10 + 9;
 	}
 	char buf[32];
-	snprintf(buf, sizeof(buf), "%0*u", int(num_digits), unsigned(volume_no));
+	snprintf(buf, sizeof(buf), "%0*u", int(num_digits),
+		 unsigned(volume_no));
 
 	std::string res;
 	size_t start = 0, pos;
@@ -306,7 +313,8 @@ create_listfile(Job &job, const char *path, size_t volume_no)
 	}
 	if (!empty) {
 		if (rename(tempfile.c_str(), path) == -1)
-			err(EX_OSERR, "rename '%s' to '%s'", tempfile.c_str(), path);
+			err(EX_OSERR, "rename '%s' to '%s'", tempfile.c_str(),
+			    path);
 	} else {
 		if (unlink(tempfile.c_str()) == -1)
 			err(EX_OSERR, "unlink '%s'", tempfile.c_str());
@@ -318,7 +326,8 @@ static int
 create_listfiles(Job &job)
 {
 	for (size_t i = 1; i <= job.volume_no; ++i) {
-		const std::string path = expand_outpath(job.outpath, i, job.volume_no);
+		const std::string path =
+		    expand_outpath(job.outpath, i, job.volume_no);
 		create_listfile(job, path.c_str(), i);
 		printf("%s created\n", path.c_str());
 	}
@@ -332,9 +341,11 @@ scan_inpath(Job &job)
 	off_t tot_size = 0;
 	for (const auto *file : job.all_files) {
 		if (file->volume_no != volume_no) {
-			printf("volume %u is %ld bytes in %u files (%.1f%% full)\n",
-			       unsigned(volume_no), long(tot_size), unsigned(n_files),
-			       tot_size * 100.0 / job.volume_size);
+			printf(
+			    "volume %u is %ld bytes in %u files (%.1f%% full)\n",
+			    unsigned(volume_no), long(tot_size),
+			    unsigned(n_files),
+			    double(tot_size) * 100.0 / double(job.volume_size));
 			++volume_no;
 			n_files = 0;
 			tot_size = 0;
@@ -344,11 +355,11 @@ scan_inpath(Job &job)
 	}
 	printf("volume %u is %ld bytes in %u files (%.1f%% full)\n",
 	       unsigned(volume_no), long(tot_size), unsigned(n_files),
-	       tot_size * 100.0 / job.volume_size);
+	       double(tot_size) * 100.0 / double(job.volume_size));
 	return 0;
 }
 
-typedef void (*SubProcessFn)(Job&, const char*listfile, const char *outpath,
+typedef void (*SubProcessFn)(Job &, const char *listfile, const char *outpath,
 			     size_t volume_id);
 static int
 subprocess(Job &job, const char *procname, SubProcessFn handler)
@@ -360,8 +371,10 @@ subprocess(Job &job, const char *procname, SubProcessFn handler)
 	close(fd);
 	for (size_t i = 1; i <= job.volume_no; ++i) {
 		create_listfile(job, listfile, i);
-		std::string path = expand_outpath(job.outpath, i, job.volume_no);
-		std::string temppath(path); temppath.append(1, '#');
+		std::string path =
+		    expand_outpath(job.outpath, i, job.volume_no);
+		std::string temppath(path);
+		temppath.append(1, '#');
 		pid_t pid = fork();
 		if (pid == -1) {
 			err(EX_OSERR, "fork");
@@ -374,17 +387,20 @@ subprocess(Job &job, const char *procname, SubProcessFn handler)
 			pid_t xpid = waitpid(pid, &status, WEXITED);
 			if (xpid == -1) {
 				warn("waitpid");
-			} if (WIFSIGNALED(status)) {
+			}
+			if (WIFSIGNALED(status)) {
 				warnx("%s exitted via signal %d", procname,
 				      WTERMSIG(status));
-			} else if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+			} else if (WIFEXITED(status) &&
+				   WEXITSTATUS(status) != 0) {
 				warnx("%s exitted with %d", procname,
 				      WEXITSTATUS(status));
 			}
 
 			if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
 				// Keep file on success
-				if (rename(temppath.c_str(), path.c_str()) != -1) {
+				if (rename(temppath.c_str(), path.c_str()) !=
+				    -1) {
 					printf("%s created\n", path.c_str());
 				} else {
 					err(EX_OSERR, "rename '%s' to '%s'",
@@ -392,7 +408,8 @@ subprocess(Job &job, const char *procname, SubProcessFn handler)
 				}
 			} else {
 				// Drop file on error
-				if (unlink(temppath.c_str()) == -1 && errno != ENOENT)
+				if (unlink(temppath.c_str()) == -1 &&
+				    errno != ENOENT)
 					warn("unlink '%s'", temppath.c_str());
 			}
 		}
@@ -411,8 +428,8 @@ tar_subproc(Job &job, const char *listfile, const char *outpath, size_t)
 	} else if (job.target == "txz") {
 		create = "-cJf";
 	}
-	execlp("tar", "tar", create, outpath, "-T", listfile, "-C", job.inpath.c_str(),
-	       NULL);
+	execlp("tar", "tar", create, outpath, "-T", listfile, "-C",
+	       job.inpath.c_str(), NULL);
 }
 static int
 create_tar(Job &job)
@@ -427,12 +444,13 @@ mkisofs_subproc(Job &job, const char *listfile, const char *outpath, size_t)
 	v = v ? v + 1 : outpath;
 	const char *endv = strchr(v, '.');
 	endv = endv ? endv : v + strlen(v);
-	std::string volume(v, endv - v);
+	std::string volume(v, size_t(endv - v));
 
 	if (chdir(job.inpath.c_str()) == -1)
 		err(EX_OSERR, "chdir '%s'", job.inpath.c_str());
 
-	// cmdline: mkisofs -r -J -udf -V <label> -path-list <listfile> -o <outpath>
+	// cmdline: mkisofs -r -J -udf -V <label> -path-list <listfile> -o
+	// <outpath>
 	execlp("mkisofs", "mkisofs", "-r", "-J", "-udf", "-V", volume.c_str(),
 	       "-path-list", listfile, "-o", outpath, "-quiet", NULL);
 }
@@ -445,10 +463,13 @@ create_iso(Job &job)
 static void
 usage(void)
 {
-	puts("usage: dirsplit [-h] [-s volsize] <in-dir> iso|cd74|dvd|bd <name>_%#.iso");
-	puts("                                           tar|tgz|txz <name>_%#.tar");
+	puts(
+	    "usage: dirsplit [-h] [-s volsize] <in-dir> iso|cd74|dvd|bd <name>_%#.iso");
+	puts(
+	    "                                           tar|tgz|txz <name>_%#.tar");
 	puts("                                           dir <name>_%#");
-	puts("                                           listfile <name>_%#.txt");
+	puts(
+	    "                                           listfile <name>_%#.txt");
 	puts("                                           scan");
 }
 
@@ -474,8 +495,8 @@ main(int argc, char *argv[])
 
 	job.target = argv[1];
 	bool need_output = true;
-	if (job.target == "iso" || job.target == "cd74" || job.target == "dvd" ||
-	    job.target == "bd") {
+	if (job.target == "iso" || job.target == "cd74" ||
+	    job.target == "dvd" || job.target == "bd") {
 		job.handler = &create_iso;
 		job.per_volume_overhead = 1024 * 1024;
 		job.per_file_overhead = 2048;
@@ -490,7 +511,8 @@ main(int argc, char *argv[])
 		}
 		if (!job.volume_size && autosize_mb)
 			job.volume_size = autosize_mb * 1024;
-	} else if (job.target == "tar" || job.target == "tgz" || job.target == "txz") {
+	} else if (job.target == "tar" || job.target == "tgz" ||
+		   job.target == "txz") {
 		job.handler = &create_tar;
 		job.per_file_overhead = 512;
 	} else if (job.target == "listfile") {
@@ -505,14 +527,16 @@ main(int argc, char *argv[])
 		errx(EX_USAGE, "%s target requires a volume size (-s)",
 		     job.target.c_str());
 	if (need_output && argc == 2)
-		errx(EX_USAGE, "%s target requires an output path", job.target.c_str());
+		errx(EX_USAGE, "%s target requires an output path",
+		     job.target.c_str());
 
 	if (need_output) {
 		job.outpath = argv[2];
 		if (job.outpath.find("%#") == job.outpath.npos)
-			errx(EX_USAGE,
-			     "illegal output path '%s' -- no %%# placeholder found",
-			     job.outpath.c_str());
+			errx(
+			    EX_USAGE,
+			    "illegal output path '%s' -- no %%# placeholder found",
+			    job.outpath.c_str());
 		if (job.outpath[0] != '/') {
 			// Convert output path to absolute, because working
 			// directory is changed for some targets.  outpath
@@ -546,10 +570,10 @@ main(int argc, char *argv[])
 	int res = scan_dir(job.inpath.c_str(), fd, &job.root, &job.scan_opts);
 	if (res)
 		warnx("errors occured while scanning '%s'", job.inpath.c_str());
-	//printf("total usage for '%s' is %ld\n", job.inpath.c_str(),
-	//       long(job.root.tot_size));
+	// printf("total usage for '%s' is %ld\n", job.inpath.c_str(),
+	//        long(job.root.tot_size));
 
-	//print_leaves(job.root);
+	// print_leaves(job.root);
 	unfold_depth1st(job.root, &job.all_files);
 	assign_volumes(job);
 	return job.handler(job);
