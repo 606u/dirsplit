@@ -1,6 +1,7 @@
 #include <sys/types.h>
 #include <cassert>
 #include <cerrno>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -15,6 +16,9 @@
 #include <sysexits.h>
 #include <unistd.h>
 #include <vector>
+
+static volatile int stopsig = 0;
+static pid_t child_pid = 0;
 
 struct Volume;
 struct Directory;
@@ -257,7 +261,7 @@ DirSplit::split_to_volumes(void)
 	for (auto *file : all_files) {
 		const off_t file_size = per_file_overhead + file->size;
 		if (file_size > volume_size)
-			warnx("file '%s/%s/%s' is larger than the target size",
+			warnx("file '%s/%s%s' is larger than the target size",
 			      inpath.c_str(), file->parent->path.c_str(),
 			      file->name.c_str());
 		if (size + file_size > volume_size) {
@@ -526,6 +530,8 @@ Volume::transfer_files(const std::string &base_dir, const std::string &dest_dir,
 	srcpath.assign(base_dir).append(1, '/');
 	destpath.assign(dest_dir).append(1, '/');
 	for (const auto *file : files) {
+		if (stopsig)
+			return false;
 		path = get_full_path(*file);
 		// Adjacent files could have different parent directories
 		if (file->parent != prev_parent) {
@@ -562,6 +568,8 @@ int
 DirSplit::create_listfiles(void)
 {
 	for (const auto &volume : volumes) {
+		if (stopsig)
+			return 1;
 		const std::string path = get_out_path(volume.volume_no);
 		std::string tempfile = get_temp_file_path(path);
 		volume.create_listfile(tempfile);
@@ -600,7 +608,9 @@ run_subproc(const std::string &procname, const std::vector<std::string> &args)
 		err(EX_OSERR, "exec %s", procname.c_str());
 	} else {
 		int status;
+		child_pid = pid;
 		pid_t xpid = waitpid(pid, &status, WEXITED);
+		child_pid = 0;
 		if (xpid == -1) {
 			warn("waitpid");
 			return false;
@@ -633,6 +643,11 @@ DirSplit::create_tar(void)
 	int res = 0;
 	const std::string listfile = create_temp_file();
 	for (const auto &volume : volumes) {
+		if (stopsig) {
+			res = 1;
+			break;
+		}
+
 		volume.create_listfile(listfile);
 		std::string path = get_out_path(volume.volume_no);
 		std::string tempfile = get_temp_file_path(path);
@@ -644,6 +659,7 @@ DirSplit::create_tar(void)
 			printf("%s created\n", path.c_str());
 		} else {
 			res = 1;
+			break;
 		}
 	}
 	(void)unlink(listfile.c_str());
@@ -670,8 +686,13 @@ DirSplit::create_iso(void)
 
 	int res = 0;
 	for (const auto &volume : volumes) {
+		if (stopsig) {
+			res = 1;
+			break;
+		}
+
+		deltree(AT_FDCWD, "", tempdir); // Doesn't delete tempdir itself
 		if (!volume.transfer_files(inpath, tempdir, xfer_symlink)) {
-			deltree(AT_FDCWD, "", tempdir);
 			res = 1;
 			break;
 		}
@@ -695,9 +716,10 @@ DirSplit::create_iso(void)
 			printf("%s created\n", path.c_str());
 		} else {
 			res = 1;
+			break;
 		}
-		deltree(AT_FDCWD, "", tempdir); // Doesn't delete tempdir itself
 	}
+	deltree(AT_FDCWD, "", tempdir);
 	if (rmdir(tempdir) == -1)
 		warn("rmdir '%s'", tempdir);
 	return res;
@@ -733,6 +755,11 @@ DirSplit::transfer(void)
 		mode = xfer_symlink;
 	}
 	for (const auto &volume : volumes) {
+		if (stopsig) {
+			res = 1;
+			break;
+		}
+
 		std::string path = get_out_path(volume.volume_no);
 		if (volume.transfer_files(inpath, path, mode)) {
 			printf("%s created\n", path.c_str());
@@ -786,6 +813,14 @@ usage(void)
 	puts(
 	    "                                           listfile <name>_%#.txt");
 	puts("                                           scan");
+}
+
+static void
+sighandler(int signo)
+{
+	stopsig = signo;
+	if (child_pid)
+		kill(child_pid, SIGTERM);
 }
 
 int
@@ -857,6 +892,9 @@ main(int argc, char *argv[])
 			    "illegal output path '%s' -- missing %%# placeholder",
 			    argv[2]);
 	}
+
+	signal(SIGINT, &sighandler);
+	signal(SIGTERM, &sighandler);
 
 	int fd = open(ds.inpath.c_str(), O_RDONLY | O_DIRECTORY);
 	if (fd == -1)
