@@ -16,35 +16,6 @@
 #include <unistd.h>
 #include <vector>
 
-template <typename T, typename Dtor> struct Guard { // RAII guard
-	T handle;
-	Dtor dtor;
-	Guard(T handle, Dtor dtor)
-	    : handle(handle)
-	    , dtor(dtor)
-	{
-	}
-	Guard(const Guard &) = delete;
-	Guard(Guard &&src)
-	    : handle(src.handle)
-	    , dtor(src.dtor)
-	{
-		src.handle = 0;
-	}
-	~Guard()
-	{
-		if (handle)
-			dtor(handle);
-	}
-	Guard &operator=(const Guard &) = delete;
-};
-template <typename T, typename Dtor>
-static inline Guard<T, Dtor>
-autofree(T handle, Dtor dtor)
-{
-	return Guard<T, Dtor>(handle, dtor);
-}
-
 struct Directory;
 struct File {
 	Directory *parent = 0;
@@ -164,8 +135,6 @@ scan_dir(const char *base_path, int base_fd, Directory *dir, ScanOpts *opts)
 		close(fd);
 		return -1;
 	}
-	// closedir(3) closes fd, as well
-	auto dirp_guard = autofree(dirp, closedir);
 	int res = 0;
 	dirent *entry;
 	while ((entry = readdir(dirp)) != nullptr) {
@@ -214,6 +183,8 @@ scan_dir(const char *base_path, int base_fd, Directory *dir, ScanOpts *opts)
 			    (std::max)(dir->newf_mtime, st.st_mtime);
 		}
 	}
+	// closedir(3) closes fd, as well
+	closedir(dirp);
 
 	if (opts && opts->dir_order)
 		dir->subdirs.sort(opts->dir_order);
@@ -298,7 +269,6 @@ create_listfile(Job &job, const char *path, size_t volume_no)
 	FILE *fp = fopen(tempfile.c_str(), "w");
 	bool empty = true;
 	if (fp) {
-		auto fp_guard = autofree(fp, fclose);
 		for (auto *file : job.all_files) {
 			if (file->volume_no != volume_no)
 				continue;
@@ -306,8 +276,8 @@ create_listfile(Job &job, const char *path, size_t volume_no)
 				file->name.c_str());
 			empty = false;
 		}
-		if (fflush(fp) != 0)
-			err(EX_OSERR, "flush '%s'", tempfile.c_str());
+		if (fclose(fp) != 0)
+			err(EX_OSERR, "close '%s'", tempfile.c_str());
 	} else {
 		err(EX_OSERR, "create '%s'", tempfile.c_str());
 	}
