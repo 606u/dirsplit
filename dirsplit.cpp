@@ -455,6 +455,65 @@ copy_file(const std::string &srcpath, const File &file,
 	return res;
 }
 
+// Recursive rm -fR <dirpath>, except it will NOT delete the <dirpath> itself
+static bool
+deltree(int base_fd, const std::string &base_path, const std::string &dirname)
+{
+	assert(dirname != "/");
+	if (dirname == "/")
+		return false;
+
+	assert(base_path.empty() || base_path.back() == '/');
+	int fd = openat(base_fd, dirname.c_str(), O_RDONLY | O_DIRECTORY);
+	if (fd == -1) {
+		warn("opendir '%s%s'", base_path.c_str(), dirname.c_str());
+		return false;
+	}
+	DIR *dirp = fdopendir(fd); // XXX: leaked upon exception
+	if (!dirp) {
+		warn("opendir '%s%s'", base_path.c_str(), dirname.c_str());
+		close(fd);
+		return false;
+	}
+	bool res = true;
+	dirent *entry;
+	std::string new_base_path;
+	new_base_path.append(base_path).append(dirname).append(1, '/');
+	while ((entry = readdir(dirp)) != nullptr) {
+		if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
+			continue;
+		struct stat st;
+		if (fstatat(fd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW) ==
+		    -1) {
+			warn("stat '%s%s/%s'", base_path.c_str(),
+			     dirname.c_str(), entry->d_name);
+			res = false;
+			continue;
+		}
+		const bool is_subdir = S_ISDIR(st.st_mode);
+		if (is_subdir) {
+			if (!deltree(fd, new_base_path, entry->d_name))
+				res = false;
+		} else {
+			if (unlinkat(fd, entry->d_name, 0) == -1) {
+				warn("unlink '%s%s/%s'", base_path.c_str(),
+				     dirname.c_str(), entry->d_name);
+			}
+		}
+	}
+
+	if (!base_path.empty() &&
+	    unlinkat(base_fd, dirname.c_str(), AT_REMOVEDIR) == -1) {
+		warn("rmdir '%s%s'", base_path.c_str(), dirname.c_str());
+		res = false;
+	}
+
+	// closedir(3) closes fd, as well
+	closedir(dirp);
+
+	return res;
+}
+
 bool
 Volume::transfer_files(const std::string &base_dir, const std::string &dest_dir,
 		       TransferMode mode) const
@@ -530,21 +589,22 @@ run_subproc(const std::string &procname, const std::vector<std::string> &args)
 {
 	pid_t pid = fork();
 	if (pid == -1) {
-		err(EX_OSERR, "fork");
+		warn("fork");
+		return false;
 	} else if (pid == 0) {
 		std::vector<char *> va;
 		va.push_back(const_cast<char *>(procname.c_str()));
 		for (auto &a : args)
 			va.push_back(const_cast<char *>(a.c_str()));
 		va.push_back(NULL);
-		// Not expected to return
 		execvp(procname.c_str(), &va[0]);
 		err(EX_OSERR, "exec %s", procname.c_str());
 	} else {
 		int status;
 		pid_t xpid = waitpid(pid, &status, WEXITED);
 		if (xpid == -1) {
-			err(EX_OSERR, "waitpid");
+			warn("waitpid");
+			return false;
 		} else if (WIFSIGNALED(status)) {
 			warnx("%s exitted via signal %d", procname.c_str(),
 			      WTERMSIG(status));
@@ -594,15 +654,28 @@ DirSplit::create_tar(void)
 int
 DirSplit::create_iso(void)
 {
+	// mkisofs(8) places all files given via -path-list in the media's root
+	// directory. As a work around create a temporary directory populated
+	// with symbolic links to source files and apply -follow-links option.
+	// However this hack prohibits including symbolic links in the image
+	char tempdir[] = { "/tmp/dirsplit.XXXXXX" };
+	if (mkdtemp(tempdir) == NULL)
+		err(EX_OSERR, "mkdtemp");
+
 	// Paths in listfile are relative to inpath, but mkisofs does not
 	// support command-line option similar to tar's -C, hence chdir(2)
-	if (chdir(inpath.c_str()) == -1)
-		err(EX_OSERR, "chdir '%s'", inpath.c_str());
+	if (chdir(tempdir) == -1) {
+		rmdir(tempdir);
+		err(EX_OSERR, "chdir '%s'", tempdir);
+	}
 
 	int res = 0;
-	const std::string listfile = create_temp_file();
 	for (const auto &volume : volumes) {
-		volume.create_listfile(listfile);
+		if (!volume.transfer_files(inpath, tempdir, xfer_symlink)) {
+			res = 1;
+			break;
+		}
+
 		std::string path = get_out_path(volume.volume_no);
 
 		const char *v = strrchr(path.c_str(), '/');
@@ -615,16 +688,18 @@ DirSplit::create_iso(void)
 		const bool success =
 		    run_subproc("mkisofs",
 				{ "-r", "-J", "-udf", "-V", volumelbl,
-				  "-path-list", listfile, "-o", tempfile,
-				  "-quiet" });
+				  "-follow-links", "-o", tempfile, "-quiet",
+				  "." });
 		signoff_file(tempfile, path, success);
 		if (success) {
 			printf("%s created\n", path.c_str());
 		} else {
 			res = 1;
 		}
+		deltree(AT_FDCWD, "", tempdir); // Doesn't delete tempdir itself
 	}
-	(void)unlink(listfile.c_str());
+	if (rmdir(tempdir) == -1)
+		warn("rmdir '%s'", tempdir);
 	return res;
 }
 

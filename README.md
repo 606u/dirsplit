@@ -32,3 +32,9 @@ To prepare your photos collection for DVD-R backup run
     # dirsplit ~/Photos dvd ~/Photos%#.iso
 
 `%#` placeholder will be replaced with volume number.
+
+
+## Limitations
+
+ * `iso` targets do not support symbolic links, due to work-arounds
+   for `mkisofs(8)` quirks.
