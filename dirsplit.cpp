@@ -376,11 +376,10 @@ make_dirs(const std::string &base_path, const std::string &rel_file_path)
 {
 	const mode_t dirmode = S_IRWXU | S_IRGRP | S_IXGRP;
 	std::string path;
+	path.append(base_path);
 	size_t start = 0, pos;
 	while ((pos = rel_file_path.find('/', start)) != rel_file_path.npos) {
-		path.assign(base_path).append(1, '/').append(rel_file_path,
-							     start,
-							     pos - start);
+		path.append(1, '/').append(rel_file_path, start, pos - start);
 		if (mkdir(path.c_str(), dirmode) == -1 && errno != EEXIST) {
 			warn("mkdir '%s'", path.c_str());
 			return false;
