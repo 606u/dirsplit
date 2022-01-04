@@ -55,12 +55,17 @@ dir_name_less(const Directory &lhs, const Directory &rhs)
 	return strcasecmp(lhs.name.c_str(), rhs.name.c_str()) < 0;
 }
 
+enum TransferMode { xfer_copy, xfer_symlink, xfer_hardlink };
+
 struct Volume {
 	std::list<File *> files;
 	off_t tot_size = 0;
 	size_t volume_no = 0;
 
 	void create_listfile(const std::string &path) const;
+	bool transfer_files(const std::string &base_dir,
+			    const std::string &dest_dir,
+			    TransferMode mode) const;
 };
 
 struct DirSplit {
@@ -94,6 +99,7 @@ struct DirSplit {
 
 	int create_tar(void);
 	int create_iso(void);
+	int transfer(void);
 	int create_listfiles(void);
 	int dry_run(void);
 };
@@ -344,6 +350,156 @@ Volume::create_listfile(const std::string &path) const
 	}
 }
 
+static std::string
+get_full_path(const Directory &dir)
+{
+	if (dir.parent && !dir.parent->is_root())
+		return get_full_path(*dir.parent)
+		    .append(1, '/')
+		    .append(dir.name);
+	return dir.name;
+}
+
+static const std::string
+get_full_path(const File &file)
+{
+	assert(file.parent);
+	if (file.parent && !file.parent->is_root())
+		return get_full_path(*file.parent)
+		    .append(1, '/')
+		    .append(file.name);
+	return file.name;
+}
+
+static bool
+make_dirs(const std::string &base_path, const std::string &rel_file_path)
+{
+	const mode_t dirmode = S_IRWXU | S_IRGRP | S_IXGRP;
+	std::string path;
+	size_t start = 0, pos;
+	while ((pos = rel_file_path.find('/', start)) != rel_file_path.npos) {
+		path.assign(base_path).append(1, '/').append(rel_file_path,
+							     start,
+							     pos - start);
+		if (mkdir(path.c_str(), dirmode) == -1 && errno != EEXIST) {
+			warn("mkdir '%s'", path.c_str());
+			return false;
+		}
+		start = pos + 1;
+	}
+	return true;
+}
+
+static bool
+copy_file(const std::string &srcpath, const File &file,
+	  const std::string &destpath)
+{
+	const std::string tempfile = get_temp_file_path(destpath);
+	std::vector<uint8_t> buffer(128 * 1024);
+	uint8_t *buf = &buffer[0];
+
+	int infd = open(srcpath.c_str(), O_RDONLY);
+	if (infd == -1) {
+		warn("open '%s'", srcpath.c_str());
+		return false;
+	}
+
+	int outfd = creat(tempfile.c_str(), file.st.st_mode);
+	if (outfd == -1) {
+		warn("create '%s'", tempfile.c_str());
+		close(infd);
+		return false;
+	}
+
+	bool res = true;
+	ssize_t br;
+	while ((br = read(infd, buf, buffer.size())) > 0) {
+		ssize_t bw = write(outfd, buf, size_t(br));
+		if (bw == -1) {
+			warn("write '%s'", tempfile.c_str());
+			res = false;
+			break;
+		}
+	}
+	if (br == -1) {
+		warn("read '%s'", srcpath.c_str());
+		res = false;
+	}
+
+	// Preserve flags
+	if (res && fchflags(outfd, file.st.st_flags) == -1) {
+		warn("chflags '%s'", tempfile.c_str());
+		res = false;
+	}
+
+	// Preserve ownership
+	if (res && fchown(outfd, file.st.st_uid, file.st.st_gid) == -1) {
+		warn("chown '%s'", tempfile.c_str());
+		res = false;
+	}
+
+	// Preserve access and modification times
+	timespec ts[2] = { file.st.st_atim, file.st.st_mtim };
+	if (res && futimens(outfd, ts) == -1) {
+		warn("utimens '%s'", tempfile.c_str());
+		res = false;
+	}
+
+	if (close(outfd) == -1) {
+		warn("close '%s'", tempfile.c_str());
+		res = false;
+	}
+	close(infd);
+
+	signoff_file(tempfile, destpath, res);
+	return res;
+}
+
+bool
+Volume::transfer_files(const std::string &base_dir, const std::string &dest_dir,
+		       TransferMode mode) const
+{
+	const mode_t dirmode = S_IRWXU | S_IRGRP | S_IXGRP;
+	if (mkdir(dest_dir.c_str(), dirmode) == -1 && errno != EEXIST)
+		err(EX_OSERR, "mkdir '%s'", dest_dir.c_str());
+
+	Directory *prev_parent = 0;
+	std::string path, srcpath, destpath;
+	srcpath.assign(base_dir).append(1, '/');
+	destpath.assign(dest_dir).append(1, '/');
+	for (const auto *file : files) {
+		path = get_full_path(*file);
+		// Adjacent files could have different parent directories
+		if (file->parent != prev_parent) {
+			make_dirs(dest_dir, path);
+			prev_parent = file->parent;
+		}
+		srcpath.erase(base_dir.length() + 1).append(path);
+		destpath.erase(dest_dir.length() + 1).append(path);
+		switch (mode) {
+		case xfer_copy:
+			if (!copy_file(srcpath, *file, destpath))
+				return false;
+			break;
+		case xfer_hardlink:
+			if (link(srcpath.c_str(), destpath.c_str()) == -1) {
+				warn("link '%s' to '%s'", srcpath.c_str(),
+				     destpath.c_str());
+				return false;
+			}
+			break;
+		case xfer_symlink:
+			if (symlink(srcpath.c_str(), destpath.c_str()) == -1) {
+				warn("symlink '%s' to '%s'", srcpath.c_str(),
+				     destpath.c_str());
+				return false;
+			}
+			break;
+		}
+	}
+	return true;
+}
+
 int
 DirSplit::create_listfiles(void)
 {
@@ -472,6 +628,28 @@ DirSplit::create_iso(void)
 	return res;
 }
 
+int
+DirSplit::transfer(void)
+{
+	int res = 0;
+	TransferMode mode = xfer_copy;
+	if (target == "link") {
+		mode = xfer_hardlink;
+	} else if (target == "symlink") {
+		mode = xfer_symlink;
+	}
+	for (const auto &volume : volumes) {
+		std::string path = get_out_path(volume.volume_no);
+		if (volume.transfer_files(inpath, path, mode)) {
+			printf("%s created\n", path.c_str());
+		} else {
+			res = 1;
+			break;
+		}
+	}
+	return res;
+}
+
 static const std::string
 get_absolute_path(const char *path)
 {
@@ -509,7 +687,8 @@ usage(void)
 	    "usage: dirsplit [-h] [-s volsize] <in-dir> iso|cd74|dvd|bd <name>_%#.iso");
 	puts(
 	    "                                           tar|tgz|txz <name>_%#.tar");
-	puts("                                           dir <name>_%#");
+	puts(
+	    "                                           copy|link|symlink <name>_%#");
 	puts(
 	    "                                           listfile <name>_%#.txt");
 	puts("                                           scan");
@@ -558,6 +737,9 @@ main(int argc, char *argv[])
 		   ds.target == "txz") {
 		target_proc = &DirSplit::create_tar;
 		ds.per_file_overhead = 512;
+	} else if (ds.target == "copy" || ds.target == "link" ||
+		   ds.target == "symlink") {
+		target_proc = &DirSplit::transfer;
 	} else if (ds.target == "listfile") {
 		target_proc = &DirSplit::create_listfiles;
 	} else if (ds.target == "scan") {
