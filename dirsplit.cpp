@@ -634,6 +634,25 @@ DirSplit::transfer(void)
 	int res = 0;
 	TransferMode mode = xfer_copy;
 	if (target == "link") {
+		// Hardlinks require input and output directory to be located on
+		// the same device; abort here if that is not so
+		struct stat inst, outst;
+
+		// Last component from outpath contains %# placeholder and is
+		// not an existing directory; ignore it
+		std::string outloc(outpath);
+		size_t pos = outloc.rfind('/');
+		if (pos != outloc.npos)
+			outloc.erase(pos);
+
+		if (stat(inpath.c_str(), &inst) == -1)
+			err(EX_OSERR, "stat '%s'", inpath.c_str());
+		if (stat(outloc.c_str(), &outst) == -1)
+			err(EX_OSERR, "stat '%s'", outloc.c_str());
+		if (inst.st_dev != outst.st_dev)
+			errx(EX_USAGE,
+			     "hard links require same device/mount point");
+
 		mode = xfer_hardlink;
 	} else if (target == "symlink") {
 		mode = xfer_symlink;
