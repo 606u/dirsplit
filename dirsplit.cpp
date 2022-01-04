@@ -256,7 +256,7 @@ void
 DirSplit::split_to_volumes(void)
 {
 	// Start with incrementing of ds.volume_no below
-	off_t size = volume_size;
+	off_t size = volume_size + 1;
 	Volume *volume = nullptr;
 	for (auto *file : all_files) {
 		const off_t file_size = per_file_overhead + file->size;
