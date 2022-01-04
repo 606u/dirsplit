@@ -74,8 +74,6 @@ struct DirSplit {
 
 	Directory root;
 	std::list<File *> all_files;
-	typedef int (*HandlerFn)(DirSplit &ds);
-	HandlerFn handler = 0;
 
 	// Enumerates files and sub-directories in dir, recursively
 	int enumerate_dir(int base_fd, Directory &dir);
@@ -85,6 +83,12 @@ struct DirSplit {
 	void split_to_volumes(void);
 	// Return outpath replacing %# placeholder with the value of volume_no
 	const std::string get_out_path(size_t volume_no) const;
+	void get_volume_files(size_t volume_no, std::list<File *> *files) const;
+
+	int create_tar(void);
+	int create_iso(void);
+	int create_listfiles(void);
+	int dry_run(void);
 };
 
 static off_t
@@ -274,60 +278,95 @@ DirSplit::get_out_path(size_t volume_no) const
 	return res;
 }
 
-static bool
-create_listfile(DirSplit &ds, const char *path, size_t volume_no)
+void
+DirSplit::get_volume_files(size_t volume_no, std::list<File *> *files) const
 {
-	std::string tempfile = path;
-	tempfile.append(1, '#');
-	FILE *fp = fopen(tempfile.c_str(), "w");
-	bool empty = true;
-	if (fp) {
-		for (auto *file : ds.all_files) {
-			if (file->volume_no != volume_no)
-				continue;
-			fprintf(fp, "%s%s\n", file->parent->path.c_str(),
-				file->name.c_str());
-			empty = false;
-		}
-		if (fclose(fp) != 0)
-			err(EX_OSERR, "close '%s'", tempfile.c_str());
-	} else {
-		err(EX_OSERR, "create '%s'", tempfile.c_str());
-	}
-	if (!empty) {
-		if (rename(tempfile.c_str(), path) == -1)
-			err(EX_OSERR, "rename '%s' to '%s'", tempfile.c_str(),
-			    path);
-	} else {
-		if (unlink(tempfile.c_str()) == -1)
-			err(EX_OSERR, "unlink '%s'", tempfile.c_str());
-	}
-	return !empty;
+	for (auto *file : all_files)
+		if (file->volume_no == volume_no)
+			files->push_back(file);
 }
 
-static int
-create_listfiles(DirSplit &ds)
+static const std::string
+get_temp_file_path(const std::string &path)
 {
-	for (size_t i = 1; i <= ds.num_volumes; ++i) {
-		const std::string path = ds.get_out_path(i);
-		create_listfile(ds, path.c_str(), i);
+	return std::string(path).append(1, '#');
+}
+
+static const std::string
+create_temp_file(void)
+{
+	char listfile[] = { "/tmp/dirsplit.XXXXXX" };
+	int fd = mkstemp(listfile);
+	if (fd == -1)
+		err(EX_OSERR, "mkstemp");
+	close(fd);
+	return listfile;
+}
+
+// Either commit temp_file to final_path or roll it back (delete it)
+static void
+signoff_file(const std::string &temp_path, const std::string &final_path,
+	     bool commit)
+{
+	if (commit) {
+		if (rename(temp_path.c_str(), final_path.c_str()) == -1)
+			err(EX_OSERR, "rename '%s' to '%s'", temp_path.c_str(),
+			    final_path.c_str());
+	} else {
+		if (unlink(temp_path.c_str()) == -1)
+			err(EX_OSERR, "unlink '%s'", temp_path.c_str());
+	}
+}
+
+static bool
+create_listfile(DirSplit &ds, const std::string &path, size_t volume_no)
+{
+	std::list<File *> files;
+	ds.get_volume_files(volume_no, &files);
+	if (files.empty())
+		return false;
+
+	FILE *fp = fopen(path.c_str(), "w");
+	if (!fp)
+		err(EX_OSERR, "create '%s'", path.c_str());
+	for (auto *file : files)
+		fprintf(fp, "%s%s\n", file->parent->path.c_str(),
+			file->name.c_str());
+	if (fclose(fp) != 0) {
+		// Don't leak corrupted file, preserve last error
+		const auto eno = errno;
+		(void)unlink(path.c_str());
+		errno = eno;
+		err(EX_OSERR, "close '%s'", path.c_str());
+	}
+	return true;
+}
+
+int
+DirSplit::create_listfiles(void)
+{
+	for (size_t i = 1; i <= num_volumes; ++i) {
+		const std::string path = get_out_path(i);
+		std::string tempfile = get_temp_file_path(path);
+		create_listfile(*this, tempfile, i);
+		signoff_file(tempfile, path, true);
 		printf("%s created\n", path.c_str());
 	}
 	return 0;
 }
 
-static int
-scan_inpath(DirSplit &ds)
+int
+DirSplit::dry_run(void)
 {
 	size_t volume_no = 1, n_files = 0;
 	off_t tot_size = 0;
-	for (const auto *file : ds.all_files) {
+	for (const auto *file : all_files) {
 		if (file->volume_no != volume_no) {
 			printf(
 			    "volume %u is %ld bytes in %u files (%.1f%% full)\n",
 			    unsigned(volume_no), long(tot_size),
 			    unsigned(n_files),
-			    double(tot_size) * 100.0 / double(ds.volume_size));
+			    double(tot_size) * 100.0 / double(volume_size));
 			++volume_no;
 			n_files = 0;
 			tot_size = 0;
@@ -337,108 +376,112 @@ scan_inpath(DirSplit &ds)
 	}
 	printf("volume %u is %ld bytes in %u files (%.1f%% full)\n",
 	       unsigned(volume_no), long(tot_size), unsigned(n_files),
-	       double(tot_size) * 100.0 / double(ds.volume_size));
+	       double(tot_size) * 100.0 / double(volume_size));
 	return 0;
 }
 
-typedef void (*SubProcessFn)(DirSplit &, const char *listfile,
-			     const char *outpath, size_t volume_id);
-static int
-subprocess(DirSplit &ds, const char *procname, SubProcessFn handler)
+// Runs procname with given args and returns true on zero exit status
+static bool
+run_subproc(const std::string &procname, const std::vector<std::string> &args)
 {
-	char listfile[] = { "/tmp/dirsplit.XXXXXX" };
-	int fd = mkstemp(listfile);
-	if (fd == -1)
-		err(EX_OSERR, "mkstemp");
-	close(fd);
-	for (size_t i = 1; i <= ds.num_volumes; ++i) {
-		create_listfile(ds, listfile, i);
-		std::string path = ds.get_out_path(i);
-		std::string temppath(path);
-		temppath.append(1, '#');
-		pid_t pid = fork();
-		if (pid == -1) {
-			err(EX_OSERR, "fork");
-		} else if (pid == 0) {
-			// Not expected to return
-			handler(ds, listfile, temppath.c_str(), i);
-			err(EX_OSERR, "exec %s", procname);
-		} else {
-			int status;
-			pid_t xpid = waitpid(pid, &status, WEXITED);
-			if (xpid == -1) {
-				warn("waitpid");
-			}
-			if (WIFSIGNALED(status)) {
-				warnx("%s exitted via signal %d", procname,
-				      WTERMSIG(status));
-			} else if (WIFEXITED(status) &&
-				   WEXITSTATUS(status) != 0) {
-				warnx("%s exitted with %d", procname,
-				      WEXITSTATUS(status));
-			}
-
-			if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-				// Keep file on success
-				if (rename(temppath.c_str(), path.c_str()) !=
-				    -1) {
-					printf("%s created\n", path.c_str());
-				} else {
-					err(EX_OSERR, "rename '%s' to '%s'",
-					    temppath.c_str(), path.c_str());
-				}
-			} else {
-				// Drop file on error
-				if (unlink(temppath.c_str()) == -1 &&
-				    errno != ENOENT)
-					warn("unlink '%s'", temppath.c_str());
-			}
+	pid_t pid = fork();
+	if (pid == -1) {
+		err(EX_OSERR, "fork");
+	} else if (pid == 0) {
+		std::vector<char *> va;
+		va.push_back(const_cast<char *>(procname.c_str()));
+		for (auto &a : args)
+			va.push_back(const_cast<char *>(a.c_str()));
+		va.push_back(NULL);
+		// Not expected to return
+		execvp(procname.c_str(), &va[0]);
+		err(EX_OSERR, "exec %s", procname.c_str());
+	} else {
+		int status;
+		pid_t xpid = waitpid(pid, &status, WEXITED);
+		if (xpid == -1) {
+			err(EX_OSERR, "waitpid");
+		} else if (WIFSIGNALED(status)) {
+			warnx("%s exitted via signal %d", procname.c_str(),
+			      WTERMSIG(status));
+		} else if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+			warnx("%s exitted with %d", procname.c_str(),
+			      WEXITSTATUS(status));
 		}
+		return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 	}
-	(void)unlink(listfile);
-	return 0;
+}
+static bool
+run_subproc(const std::string &procname,
+	    const std::initializer_list<std::string> &args)
+{
+	return run_subproc(procname, std::vector<std::string>(args));
 }
 
-static void
-tar_subproc(DirSplit &ds, const char *listfile, const char *outpath, size_t)
+int
+DirSplit::create_tar(void)
 {
-	// cmdline: tar -cf <name> -T <listfile> -C <inpath>
 	const char *create = "-cf";
-	if (ds.target == "tgz") {
+	if (target == "tgz") {
 		create = "-czf";
-	} else if (ds.target == "txz") {
+	} else if (target == "txz") {
 		create = "-cJf";
 	}
-	execlp("tar", "tar", create, outpath, "-T", listfile, "-C",
-	       ds.inpath.c_str(), NULL);
-}
-static int
-create_tar(DirSplit &ds)
-{
-	return subprocess(ds, "tar", tar_subproc);
+	int res = 0;
+	const std::string listfile = create_temp_file();
+	for (size_t i = 1; i <= num_volumes; ++i) {
+		create_listfile(*this, listfile, i);
+		std::string path = get_out_path(i);
+		std::string tempfile = get_temp_file_path(path);
+		const bool success = run_subproc("tar",
+						 { create, tempfile, "-T",
+						   listfile, "-C", inpath });
+		signoff_file(tempfile, path, success);
+		if (success) {
+			printf("%s created\n", path.c_str());
+		} else {
+			res = 1;
+		}
+	}
+	(void)unlink(listfile.c_str());
+	return res;
 }
 
-static void
-mkisofs_subproc(DirSplit &ds, const char *listfile, const char *outpath, size_t)
+int
+DirSplit::create_iso(void)
 {
-	const char *v = strrchr(outpath, '/');
-	v = v ? v + 1 : outpath;
-	const char *endv = strchr(v, '.');
-	endv = endv ? endv : v + strlen(v);
-	std::string volume(v, size_t(endv - v));
+	// Paths in listfile are relative to inpath, but mkisofs does not
+	// support command-line option similar to tar's -C, hence chdir(2)
+	if (chdir(inpath.c_str()) == -1)
+		err(EX_OSERR, "chdir '%s'", inpath.c_str());
 
-	if (chdir(ds.inpath.c_str()) == -1)
-		err(EX_OSERR, "chdir '%s'", ds.inpath.c_str());
+	int res = 0;
+	const std::string listfile = create_temp_file();
+	for (size_t i = 1; i <= num_volumes; ++i) {
+		create_listfile(*this, listfile, i);
+		std::string path = get_out_path(i);
 
-	// cmdline: mkisofs -r -J -udf -V <label> -path-list <listfile> -o
-	// <outpath>
-	execlp("mkisofs", "mkisofs", "-r", "-J", "-udf", "-V", volume.c_str(),
-	       "-path-list", listfile, "-o", outpath, "-quiet", NULL);
-}
-static int
-create_iso(DirSplit &ds)
-{
-	return subprocess(ds, "mkisofs", mkisofs_subproc);
+		const char *v = strrchr(path.c_str(), '/');
+		v = v ? v + 1 : path.c_str();
+		const char *endv = strchr(v, '.');
+		endv = endv ? endv : v + strlen(v);
+		std::string volumelbl(v, size_t(endv - v));
+
+		std::string tempfile = get_temp_file_path(path);
+		const bool success =
+		    run_subproc("mkisofs",
+				{ "-r", "-J", "-udf", "-V", volumelbl,
+				  "-path-list", listfile, "-o", tempfile,
+				  "-quiet" });
+		signoff_file(tempfile, path, success);
+		if (success) {
+			printf("%s created\n", path.c_str());
+		} else {
+			res = 1;
+		}
+	}
+	(void)unlink(listfile.c_str());
+	return res;
 }
 
 static const std::string
@@ -504,14 +547,15 @@ main(int argc, char *argv[])
 
 	ds.inpath = get_absolute_path(argv[0]);
 
+	int (DirSplit::*target_proc)(void) = 0;
 	ds.target = argv[1];
 	bool need_output = true;
 	if (ds.target == "iso" || ds.target == "cd74" || ds.target == "dvd" ||
 	    ds.target == "bd") {
-		ds.handler = &create_iso;
+		target_proc = &DirSplit::create_iso;
+		ds.block_size = 2048;
 		ds.per_volume_overhead = 1024 * 1024;
 		ds.per_file_overhead = 2048;
-		ds.block_size = 2048;
 		off_t autosize_mb = 0;
 		if (ds.target == "cd74") {
 			autosize_mb = 650;
@@ -521,15 +565,15 @@ main(int argc, char *argv[])
 			autosize_mb = 23828;
 		}
 		if (!ds.volume_size && autosize_mb)
-			ds.volume_size = autosize_mb * 1024;
+			ds.volume_size = autosize_mb * 1024 * 1024;
 	} else if (ds.target == "tar" || ds.target == "tgz" ||
 		   ds.target == "txz") {
-		ds.handler = &create_tar;
+		target_proc = &DirSplit::create_tar;
 		ds.per_file_overhead = 512;
 	} else if (ds.target == "listfile") {
-		ds.handler = &create_listfiles;
+		target_proc = &DirSplit::create_listfiles;
 	} else if (ds.target == "scan") {
-		ds.handler = &scan_inpath;
+		target_proc = &DirSplit::dry_run;
 		need_output = false;
 	} else {
 		errx(EX_USAGE, "illegal target -- %s", ds.target.c_str());
@@ -562,5 +606,5 @@ main(int argc, char *argv[])
 	// print_leaves(ds.root);
 	ds.enumerate_files(ds.root);
 	ds.split_to_volumes();
-	return ds.handler(ds);
+	return (ds.*target_proc)();
 }
