@@ -671,6 +671,7 @@ DirSplit::create_iso(void)
 	int res = 0;
 	for (const auto &volume : volumes) {
 		if (!volume.transfer_files(inpath, tempdir, xfer_symlink)) {
+			deltree(AT_FDCWD, "", tempdir);
 			res = 1;
 			break;
 		}
