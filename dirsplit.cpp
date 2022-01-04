@@ -16,13 +16,14 @@
 #include <unistd.h>
 #include <vector>
 
+struct Volume;
 struct Directory;
 struct File {
 	Directory *parent = 0;
 	std::string name;
 	off_t size; // rounded-up to block size
 	struct stat st;
-	size_t volume_no = 0;
+	Volume *volume = 0;
 
 	typedef bool (*OrderFn)(const File &, const File &);
 };
@@ -54,6 +55,14 @@ dir_name_less(const Directory &lhs, const Directory &rhs)
 	return strcasecmp(lhs.name.c_str(), rhs.name.c_str()) < 0;
 }
 
+struct Volume {
+	std::list<File *> files;
+	off_t tot_size = 0;
+	size_t volume_no = 0;
+
+	void create_listfile(const std::string &path) const;
+};
+
 struct DirSplit {
 	std::string inpath;
 	std::string target;
@@ -70,10 +79,9 @@ struct DirSplit {
 	Directory::OrderFn dir_order = &dir_name_less;
 	File::OrderFn file_order = &file_name_less;
 
-	size_t num_volumes = 0;
-
 	Directory root;
 	std::list<File *> all_files;
+	std::list<Volume> volumes;
 
 	// Enumerates files and sub-directories in dir, recursively
 	int enumerate_dir(int base_fd, Directory &dir);
@@ -83,7 +91,6 @@ struct DirSplit {
 	void split_to_volumes(void);
 	// Return outpath replacing %# placeholder with the value of volume_no
 	const std::string get_out_path(size_t volume_no) const;
-	void get_volume_files(size_t volume_no, std::list<File *> *files) const;
 
 	int create_tar(void);
 	int create_iso(void);
@@ -240,6 +247,7 @@ DirSplit::split_to_volumes(void)
 {
 	// Start with incrementing of ds.volume_no below
 	off_t size = volume_size;
+	Volume *volume = nullptr;
 	for (auto *file : all_files) {
 		const off_t file_size = per_file_overhead + file->size;
 		if (file_size > volume_size)
@@ -247,12 +255,19 @@ DirSplit::split_to_volumes(void)
 			      inpath.c_str(), file->parent->path.c_str(),
 			      file->name.c_str());
 		if (size + file_size > volume_size) {
-			++num_volumes;
+			if (volume)
+				volume->tot_size = size;
+			volumes.push_back(Volume());
+			volume = &volumes.back();
+			volume->volume_no = volumes.size();
 			size = per_volume_overhead;
 		}
-		file->volume_no = num_volumes;
+		file->volume = volume;
+		volume->files.push_back(file);
 		size += file_size;
 	}
+	if (volume)
+		volume->tot_size = size;
 }
 
 const std::string
@@ -260,6 +275,7 @@ DirSplit::get_out_path(size_t volume_no) const
 {
 	// Extend volume_no with zeros to make all output paths' width uniform
 	size_t num_digits = 1, test = 9;
+	const size_t num_volumes = volumes.size();
 	while (num_volumes > test) {
 		++num_digits;
 		test = test * 10 + 9;
@@ -276,14 +292,6 @@ DirSplit::get_out_path(size_t volume_no) const
 	}
 	res.append(outpath, start, outpath.length() - start);
 	return res;
-}
-
-void
-DirSplit::get_volume_files(size_t volume_no, std::list<File *> *files) const
-{
-	for (auto *file : all_files)
-		if (file->volume_no == volume_no)
-			files->push_back(file);
 }
 
 static const std::string
@@ -318,14 +326,9 @@ signoff_file(const std::string &temp_path, const std::string &final_path,
 	}
 }
 
-static bool
-create_listfile(DirSplit &ds, const std::string &path, size_t volume_no)
+void
+Volume::create_listfile(const std::string &path) const
 {
-	std::list<File *> files;
-	ds.get_volume_files(volume_no, &files);
-	if (files.empty())
-		return false;
-
 	FILE *fp = fopen(path.c_str(), "w");
 	if (!fp)
 		err(EX_OSERR, "create '%s'", path.c_str());
@@ -339,16 +342,15 @@ create_listfile(DirSplit &ds, const std::string &path, size_t volume_no)
 		errno = eno;
 		err(EX_OSERR, "close '%s'", path.c_str());
 	}
-	return true;
 }
 
 int
 DirSplit::create_listfiles(void)
 {
-	for (size_t i = 1; i <= num_volumes; ++i) {
-		const std::string path = get_out_path(i);
+	for (const auto &volume : volumes) {
+		const std::string path = get_out_path(volume.volume_no);
 		std::string tempfile = get_temp_file_path(path);
-		create_listfile(*this, tempfile, i);
+		volume.create_listfile(tempfile);
 		signoff_file(tempfile, path, true);
 		printf("%s created\n", path.c_str());
 	}
@@ -358,25 +360,11 @@ DirSplit::create_listfiles(void)
 int
 DirSplit::dry_run(void)
 {
-	size_t volume_no = 1, n_files = 0;
-	off_t tot_size = 0;
-	for (const auto *file : all_files) {
-		if (file->volume_no != volume_no) {
-			printf(
-			    "volume %u is %ld bytes in %u files (%.1f%% full)\n",
-			    unsigned(volume_no), long(tot_size),
-			    unsigned(n_files),
-			    double(tot_size) * 100.0 / double(volume_size));
-			++volume_no;
-			n_files = 0;
-			tot_size = 0;
-		}
-		++n_files;
-		tot_size += file->size;
-	}
-	printf("volume %u is %ld bytes in %u files (%.1f%% full)\n",
-	       unsigned(volume_no), long(tot_size), unsigned(n_files),
-	       double(tot_size) * 100.0 / double(volume_size));
+	for (const auto &volume : volumes)
+		printf("volume %u is %ld bytes in %u files (%.1f%% full)\n",
+		       unsigned(volume.volume_no), long(volume.tot_size),
+		       unsigned(volume.files.size()),
+		       double(volume.tot_size) * 100.0 / double(volume_size));
 	return 0;
 }
 
@@ -429,9 +417,9 @@ DirSplit::create_tar(void)
 	}
 	int res = 0;
 	const std::string listfile = create_temp_file();
-	for (size_t i = 1; i <= num_volumes; ++i) {
-		create_listfile(*this, listfile, i);
-		std::string path = get_out_path(i);
+	for (const auto &volume : volumes) {
+		volume.create_listfile(listfile);
+		std::string path = get_out_path(volume.volume_no);
 		std::string tempfile = get_temp_file_path(path);
 		const bool success = run_subproc("tar",
 						 { create, tempfile, "-T",
@@ -457,9 +445,9 @@ DirSplit::create_iso(void)
 
 	int res = 0;
 	const std::string listfile = create_temp_file();
-	for (size_t i = 1; i <= num_volumes; ++i) {
-		create_listfile(*this, listfile, i);
-		std::string path = get_out_path(i);
+	for (const auto &volume : volumes) {
+		volume.create_listfile(listfile);
+		std::string path = get_out_path(volume.volume_no);
 
 		const char *v = strrchr(path.c_str(), '/');
 		v = v ? v + 1 : path.c_str();
