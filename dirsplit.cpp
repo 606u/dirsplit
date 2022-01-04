@@ -429,11 +429,13 @@ copy_file(const std::string &srcpath, const File &file,
 		res = false;
 	}
 
+#if defined(__FreeBSD__) || defined(__APPLE__)
 	// Preserve flags
 	if (res && fchflags(outfd, file.st.st_flags) == -1) {
 		warn("chflags '%s'", tempfile.c_str());
 		res = false;
 	}
+#endif
 
 	// Preserve ownership
 	if (res && fchown(outfd, file.st.st_uid, file.st.st_gid) == -1) {
