@@ -8,7 +8,7 @@ xflags := /$(build)
 xflags := $(xflags:/debug=-O0 -D_DEBUG)
 xflags := $(xflags:/release=-O2 -DNDEBUG)
 
-CXXFLAGS += -Wall -Wextra -g $(xflags)
+CXXFLAGS += -std=c++11 -Wall -Wextra -g $(xflags)
 LDFLAGS += -g
 
 all: $(binary)

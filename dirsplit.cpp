@@ -412,7 +412,7 @@ tar_subproc(Job &job, const char *listfile, const char *outpath, size_t)
 		create = "-cJf";
 	}
 	execlp("tar", "tar", create, outpath, "-T", listfile, "-C", job.inpath.c_str(),
-	       nullptr);
+	       NULL);
 }
 static int
 create_tar(Job &job)
@@ -434,7 +434,7 @@ mkisofs_subproc(Job &job, const char *listfile, const char *outpath, size_t)
 
 	// cmdline: mkisofs -r -J -udf -V <label> -path-list <listfile> -o <outpath>
 	execlp("mkisofs", "mkisofs", "-r", "-J", "-udf", "-V", volume.c_str(),
-	       "-path-list", listfile, "-o", outpath, "-quiet", nullptr);
+	       "-path-list", listfile, "-o", outpath, "-quiet", NULL);
 }
 static int
 create_iso(Job &job)
