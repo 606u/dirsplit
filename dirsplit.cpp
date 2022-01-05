@@ -83,6 +83,12 @@ struct DirSplit {
 	// TODO: need per-directory overhead
 	off_t per_file_overhead = 0;
 
+	size_t n_invalnm = 0; // # of files/dirs w/ invalid multibyte char name
+	size_t n_special = 0; // # of special files (pipes, sockets, devices)
+	size_t n_symlinks = 0; // # of symlinks found
+	size_t n_longfn = 0; // # of file names longer than 64 wide characters
+	size_t n_largesz = 0; // # of files with large size
+
 	bool abort_on_err = false;
 	bool depth1st = true; // file enumeration strategy
 	Directory::OrderFn dir_order = &dir_name_less;
@@ -168,6 +174,7 @@ DirSplit::enumerate_dir(int base_fd, Directory &dir)
 	}
 	int res = 0;
 	dirent *entry;
+	std::vector<wchar_t> wcbuf;
 	while ((entry = readdir(dirp)) != nullptr) {
 		if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
 			continue;
@@ -181,6 +188,12 @@ DirSplit::enumerate_dir(int base_fd, Directory &dir)
 			res = 1;
 			continue;
 		}
+
+		const size_t nmlen1 = strlen(entry->d_name) + 1;
+		wcbuf.resize(nmlen1);
+		const size_t nmlen2 =
+		    mbstowcs(&wcbuf[0], entry->d_name, nmlen1);
+
 		const bool is_subdir = S_ISDIR(st.st_mode);
 		const bool is_file = S_ISREG(st.st_mode) || S_ISLNK(st.st_mode);
 		if (is_subdir) {
@@ -196,6 +209,12 @@ DirSplit::enumerate_dir(int base_fd, Directory &dir)
 			dir.tot_size += subdir.tot_size;
 			dir.newf_mtime =
 			    (std::max)(dir.newf_mtime, subdir.newf_mtime);
+
+			if (nmlen2 == size_t(-1)) {
+				++n_invalnm;
+			} else if (nmlen2 > 64) {
+				++n_longfn;
+			}
 		} else if (is_file) {
 			dir.files.push_back(File());
 			auto &file = dir.files.back();
@@ -212,6 +231,18 @@ DirSplit::enumerate_dir(int base_fd, Directory &dir)
 			dir.tot_size += file.size;
 			dir.newf_mtime =
 			    (std::max)(dir.newf_mtime, st.st_mtime);
+
+			if (S_ISLNK(st.st_mode))
+				++n_symlinks;
+			if (file.size > volume_size)
+				++n_largesz;
+			if (nmlen2 == size_t(-1)) {
+				++n_invalnm;
+			} else if (nmlen2 > 64) {
+				++n_longfn;
+			}
+		} else {
+			++n_special;
 		}
 	}
 	// closedir(3) closes fd, as well
@@ -588,6 +619,18 @@ DirSplit::create_listfiles(void)
 int
 DirSplit::dry_run(void)
 {
+	if (n_invalnm)
+		warnx("%u file(s)/dir(s) with invalid names",
+		      unsigned(n_invalnm));
+	if (n_special)
+		warnx("%u special file(s)", unsigned(n_special));
+	if (n_symlinks)
+		warnx("%u symlink(s)", unsigned(n_symlinks));
+	if (n_longfn)
+		warnx("%u file(s)/dir(s) with long names", unsigned(n_longfn));
+	if (n_largesz)
+		warnx("%u file(s) larger than target size",
+		      unsigned(n_largesz));
 	for (const auto &volume : volumes)
 		printf("volume %u is %ld bytes in %u files (%.1f%% full)\n",
 		       unsigned(volume.volume_no), long(volume.tot_size),
