@@ -17,6 +17,8 @@
 #include <unistd.h>
 #include <vector>
 
+static const size_t ISO_FN_MAXLEN = 102; // Joliet
+
 static volatile int stopsig = 0;
 static pid_t child_pid = 0;
 
@@ -86,7 +88,7 @@ struct DirSplit {
 	size_t n_invalnm = 0; // # of files/dirs w/ invalid multibyte char name
 	size_t n_special = 0; // # of special files (pipes, sockets, devices)
 	size_t n_symlinks = 0; // # of symlinks found
-	size_t n_longfn = 0; // # of file names longer than 64 wide characters
+	size_t n_longfn = 0; // # of too long file names
 	size_t n_largesz = 0; // # of files with large size
 
 	bool abort_on_err = false;
@@ -212,7 +214,7 @@ DirSplit::enumerate_dir(int base_fd, Directory &dir)
 
 			if (nmlen2 == size_t(-1)) {
 				++n_invalnm;
-			} else if (nmlen2 > 64) {
+			} else if (nmlen2 > ISO_FN_MAXLEN) {
 				++n_longfn;
 			}
 		} else if (is_file) {
@@ -238,7 +240,7 @@ DirSplit::enumerate_dir(int base_fd, Directory &dir)
 				++n_largesz;
 			if (nmlen2 == size_t(-1)) {
 				++n_invalnm;
-			} else if (nmlen2 > 64) {
+			} else if (nmlen2 > ISO_FN_MAXLEN) {
 				++n_longfn;
 			}
 		} else {
@@ -757,9 +759,9 @@ DirSplit::create_iso(void)
 		std::string tempfile = get_temp_file_path(path);
 		const bool success =
 		    run_subproc("mkisofs",
-				{ "-r", "-J", "-udf", "-V", volumelbl,
-				  "-follow-links", "-o", tempfile, "-quiet",
-				  "." });
+				{ "-r", "-J", "-joliet-long", "-udf",
+				  "-follow-links", "-V", volumelbl, "-quiet",
+				  "-o", tempfile, "." });
 		signoff_file(tempfile, path, success);
 		if (success) {
 			printf("%s created\n", path.c_str());
